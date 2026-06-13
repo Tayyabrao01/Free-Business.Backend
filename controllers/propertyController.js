@@ -1,4 +1,5 @@
 const Property = require("../models/Property");
+const { recordPropertyCompletion } = require("../services/rewardTrackingService");
 
 const createProperty = async (req, res) => {
   try {
@@ -119,11 +120,31 @@ const updateProperty = async (req, res) => {
     property.city = city ?? property.city;
     property.images = images ?? property.images;
     property.isFeatured = isFeatured ?? property.isFeatured;
+    const previousStatus = property.status;
     property.status = status ?? property.status;
 
     await property.save();
 
-    return res.status(200).json({ message: "Property updated successfully", property });
+    let commissionInfo = null;
+    const completedStatuses = ["sold", "rented"];
+    if (
+      completedStatuses.includes(property.status) &&
+      previousStatus === "available" &&
+      property.owner
+    ) {
+      const purpose = property.status === "rented" ? "rent" : "sale";
+      commissionInfo = await recordPropertyCompletion(
+        property.owner,
+        purpose,
+        property.price
+      );
+    }
+
+    return res.status(200).json({
+      message: "Property updated successfully",
+      property,
+      commission: commissionInfo?.commission || 0,
+    });
   } catch (error) {
     return res.status(500).json({ message: "Failed to update property", error: error.message });
   }

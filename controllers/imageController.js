@@ -3,8 +3,51 @@ const path = require("path");
 const Image = require("../models/Image");
 const Property = require("../models/Property");
 
+const uploadsDir = path.join(__dirname, "..", "uploads");
+
+const ensureUploadsDir = () => {
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+};
+
+const saveImageRecord = async (req, res, { imageUrl, filename, mimeType, size, property, caption }) => {
+  if (property) {
+    const propertyRecord = await Property.findById(property);
+    if (!propertyRecord) {
+      const filePath = path.join(uploadsDir, filename);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+      return res.status(404).json({ message: "Property not found" });
+    }
+  }
+
+  const image = await Image.create({
+    url: imageUrl,
+    filename,
+    mimeType,
+    size,
+    caption,
+    property,
+    user: req.user._id,
+  });
+
+  if (property) {
+    const propertyRecord = await Property.findById(property);
+    propertyRecord.images = propertyRecord.images || [];
+    if (!propertyRecord.images.includes(imageUrl)) {
+      propertyRecord.images.push(imageUrl);
+      await propertyRecord.save();
+    }
+  }
+
+  return res.status(201).json({ message: "Image uploaded successfully", image });
+};
+
 const createImage = async (req, res) => {
   try {
+    ensureUploadsDir();
     if (!req.file) {
       return res.status(400).json({ message: "Image file is required" });
     }
@@ -12,34 +55,49 @@ const createImage = async (req, res) => {
     const { property, caption } = req.body;
     const imageUrl = `/uploads/${req.file.filename}`;
 
-    if (property) {
-      const propertyRecord = await Property.findById(property);
-      if (!propertyRecord) {
-        fs.unlinkSync(req.file.path);
-        return res.status(404).json({ message: "Property not found" });
-      }
-    }
-
-    const image = await Image.create({
-      url: imageUrl,
+    return saveImageRecord(req, res, {
+      imageUrl,
       filename: req.file.filename,
       mimeType: req.file.mimetype,
       size: req.file.size,
-      caption,
       property,
-      user: req.user._id,
+      caption,
     });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to upload image", error: error.message });
+  }
+};
 
-    if (property) {
-      const propertyRecord = await Property.findById(property);
-      propertyRecord.images = propertyRecord.images || [];
-      if (!propertyRecord.images.includes(imageUrl)) {
-        propertyRecord.images.push(imageUrl);
-        await propertyRecord.save();
-      }
+const createImageFromBase64 = async (req, res) => {
+  try {
+    ensureUploadsDir();
+    const { image, mimeType = "image/jpeg", property, caption } = req.body;
+
+    if (!image || typeof image !== "string") {
+      return res.status(400).json({ message: "Image data is required" });
     }
 
-    return res.status(201).json({ message: "Image uploaded successfully", image });
+    const buffer = Buffer.from(image, "base64");
+    if (!buffer.length) {
+      return res.status(400).json({ message: "Invalid image data" });
+    }
+    if (buffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ message: "Image is too large. Use a photo under 5 MB." });
+    }
+
+    const ext = mimeType.includes("png") ? "png" : "jpg";
+    const filename = `${Date.now()}-upload.${ext}`;
+    fs.writeFileSync(path.join(uploadsDir, filename), buffer);
+
+    const imageUrl = `/uploads/${filename}`;
+    return saveImageRecord(req, res, {
+      imageUrl,
+      filename,
+      mimeType,
+      size: buffer.length,
+      property,
+      caption,
+    });
   } catch (error) {
     return res.status(500).json({ message: "Failed to upload image", error: error.message });
   }
@@ -139,6 +197,8 @@ const deleteImage = async (req, res) => {
 
 module.exports = {
   createImage,
+  createImageFromBase64,
+  ensureUploadsDir,
   getImages,
   getImage,
   getImagesByProperty,

@@ -1,4 +1,6 @@
 const Post = require("../models/Post");
+const Activity = require("../models/Activity");
+const { incrementPostsCount } = require("../services/rewardTrackingService");
 
 // Get all posts
 const getPosts = async (req, res) => {
@@ -29,6 +31,19 @@ const createPost = async (req, res) => {
       imageUrl,
       author,
     });
+
+    await incrementPostsCount(author);
+
+    try {
+      await Activity.create({
+        user: author,
+        action: 'post',
+        targetType: 'post',
+        targetId: post._id,
+      });
+    } catch (activityError) {
+      console.error('Post activity log error:', activityError.message);
+    }
 
     const populatedPost = await Post.findById(post._id).populate("author", "name email");
 

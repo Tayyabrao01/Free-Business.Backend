@@ -80,4 +80,8 @@ const propertySchema = new mongoose.Schema(
 }
 );
 
+propertySchema.index({ city: 1 });
+propertySchema.index({ price: 1 });
+propertySchema.index({ city: 1, price: 1 });
+
 module.exports = mongoose.model("Property", propertySchema);
