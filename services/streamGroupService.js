@@ -29,17 +29,17 @@ const collectMemberIds = (group, requestingUserId) => {
 /**
  * Create or update the Stream messaging channel for a MongoDB group.
  */
-const syncGroupStreamChannel = async (group, requestingUserId) => {
+const syncGroupStreamChannel = async (group, requestingUserId, options = {}) => {
   const serverClient = getStreamServerClient();
   if (!serverClient || !group?._id) {
-    return { synced: false, reason: 'stream_not_configured' };
+    throw new Error('Stream is not configured on the server (STREAM_API_KEY / STREAM_API_SECRET)');
   }
 
   await ensureMessagingPermissions(serverClient);
 
   const memberIds = collectMemberIds(group, requestingUserId);
   if (!memberIds.length) {
-    return { synced: false, reason: 'no_members' };
+    throw new Error('Group has no members to sync chat');
   }
 
   await upsertStreamUsers(serverClient, memberIds);
@@ -61,15 +61,9 @@ const syncGroupStreamChannel = async (group, requestingUserId) => {
       free_business_group_id: group._id.toString(),
       free_business_owner_id: ownerId,
     },
-    ownerId
+    ownerId,
+    options
   );
-
-  try {
-    const channel = serverClient.channel('messaging', channelId);
-    await channel.addModerators([ownerId]);
-  } catch (modError) {
-    console.warn('Stream group moderator assign:', modError?.message);
-  }
 
   return {
     synced: true,

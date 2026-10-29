@@ -4,7 +4,8 @@ const User = require("../models/User");
 const { applyReferralOnRegister } = require("../services/rewardTrackingService");
 const { deleteUserAccount } = require("../services/accountDeletionService");
 const { verifyFirebaseIdToken } = require("../config/firebaseAdmin");
-const { sendPasswordResetEmail } = require("../services/emailService");
+const { sendPasswordResetEmail, sendRegistrationOtpEmail } = require("../services/emailService");
+const EmailVerification = require("../models/EmailVerification");
 const crypto = require("crypto");
 
 // Generate JWT token
@@ -47,11 +48,7 @@ const registerUser = async (req, res) => {
     }
 
     const normalizedPhone = toE164ish(phone);
-    const normalizedWhatsapp = toE164ish(whatsappNumber);
-
-    if (!normalizedPhone || !normalizedWhatsapp) {
-      return res.status(400).json({ message: "Phone number and WhatsApp number are required" });
-    }
+    const normalizedWhatsapp = toE164ish(whatsappNumber || phone);
 
     if (!process.env.JWT_SECRET) {
       return res.status(500).json({ message: "Server misconfigured: JWT_SECRET is missing" });
@@ -69,11 +66,13 @@ const registerUser = async (req, res) => {
     if (existingUser) {
       return res.status(400).json({ message: "Email already registered. Please log in." });
     }
-    const existingPhoneUser = await User.findOne({
-      $or: [{ phone: normalizedPhone }, { whatsappNumber: normalizedWhatsapp }],
-    });
-    if (existingPhoneUser) {
-      return res.status(400).json({ message: "Phone/WhatsApp number already registered. Please log in." });
+    if (normalizedPhone) {
+      const existingPhoneUser = await User.findOne({
+        $or: [{ phone: normalizedPhone }, { whatsappNumber: normalizedWhatsapp }],
+      });
+      if (existingPhoneUser) {
+        return res.status(400).json({ message: "Phone number already registered. Please log in." });
+      }
     }
 
     // Hash password
@@ -87,8 +86,8 @@ const registerUser = async (req, res) => {
           name: name.trim(),
           email: normalizedEmail,
           password: hashedPassword,
-          phone: normalizedPhone,
-          whatsappNumber: normalizedWhatsapp,
+          phone: normalizedPhone || undefined,
+          whatsappNumber: normalizedWhatsapp || undefined,
           location: userLocation,
           role: role || "user",
         });
@@ -356,6 +355,171 @@ const forgotPassword = async (req, res) => {
   }
 };
 
+const sendRegisterOtp = async (req, res) => {
+  try {
+    const { name, email, password, phone, whatsappNumber, location, referralCode } = req.body;
+
+    if (!name?.trim() || !email?.trim() || !password) {
+      return res.status(400).json({ message: "Please provide name, email and password" });
+    }
+    if (String(password).length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedPhone = toE164ish(phone);
+    const normalizedWhatsapp = toE164ish(whatsappNumber || phone);
+    const userLocation = (location && String(location).trim()) || "Not specified";
+
+    const existingUser = await User.findOne({ email: normalizedEmail });
+    if (existingUser) {
+      return res.status(400).json({ message: "Email already registered. Please log in." });
+    }
+    if (normalizedPhone) {
+      const existingPhoneUser = await User.findOne({
+        $or: [{ phone: normalizedPhone }, { whatsappNumber: normalizedWhatsapp }],
+      });
+      if (existingPhoneUser) {
+        return res.status(400).json({ message: "Phone number already registered." });
+      }
+    }
+
+    const code = String(crypto.randomInt(100000, 999999));
+    const codeHash = await bcrypt.hash(code, 10);
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
+    const storedPayload = {
+      name: name.trim(),
+      password,
+      phone: normalizedPhone || "",
+      whatsappNumber: normalizedWhatsapp || "",
+      location: userLocation,
+      referralCode: referralCode?.trim()?.toUpperCase() || "",
+    };
+
+    const emailResult = await sendRegistrationOtpEmail(normalizedEmail, code);
+    if (!emailResult.success) {
+      const msg = emailResult.error || "Failed to send verification code";
+      return res.status(500).json({ message: msg, error: msg });
+    }
+
+    await EmailVerification.findOneAndUpdate(
+      { email: normalizedEmail, purpose: "register" },
+      {
+        email: normalizedEmail,
+        purpose: "register",
+        codeHash,
+        expires,
+        payload: storedPayload,
+      },
+      { upsert: true, new: true }
+    );
+
+    return res.status(200).json({
+      message: "Verification code sent to your email. Check your inbox.",
+    });
+  } catch (error) {
+    return res.status(500).json({
+      message: "Failed to send verification code",
+      error: error.message || "Failed to send verification code",
+    });
+  }
+};
+
+const verifyRegisterOtp = async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    if (!email || !code) {
+      return res.status(400).json({ message: "Email and verification code are required" });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "Server misconfigured: JWT_SECRET is missing" });
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const pending = await EmailVerification.findOne({
+      email: normalizedEmail,
+      purpose: "register",
+    });
+
+    if (!pending || !pending.codeHash || !pending.expires) {
+      return res.status(400).json({ message: "Invalid or expired verification code" });
+    }
+    if (pending.expires < new Date()) {
+      await EmailVerification.deleteOne({ _id: pending._id });
+      return res.status(400).json({ message: "Verification code has expired. Request a new one." });
+    }
+
+    const codeMatch = await bcrypt.compare(String(code).trim(), pending.codeHash);
+    if (!codeMatch) {
+      return res.status(400).json({ message: "Invalid verification code" });
+    }
+
+    const { name, password, phone, whatsappNumber, location, referralCode } = pending.payload || {};
+    const existingUser = await User.findOne({ email: normalizedEmail });
+    if (existingUser) {
+      await EmailVerification.deleteOne({ _id: pending._id });
+      return res.status(400).json({ message: "Email already registered. Please log in." });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    let user;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        user = await User.create({
+          name: String(name).trim(),
+          email: normalizedEmail,
+          password: hashedPassword,
+          phone: phone || undefined,
+          whatsappNumber: whatsappNumber || undefined,
+          location: location || "Not specified",
+          role: "user",
+        });
+        break;
+      } catch (createError) {
+        if (createError.code === 11000 && createError.keyPattern?.referralCode && attempt < 4) {
+          continue;
+        }
+        throw createError;
+      }
+    }
+
+    if (!user) {
+      return res.status(500).json({ message: "Could not create user. Please try again." });
+    }
+
+    if (referralCode) {
+      try {
+        await applyReferralOnRegister(user, referralCode);
+      } catch (referralError) {
+        console.warn("Referral apply failed:", referralError.message);
+      }
+    }
+
+    await EmailVerification.deleteOne({ _id: pending._id });
+
+    const freshUser = await User.findById(user._id).select("-password");
+
+    return res.status(201).json({
+      message: "User registered successfully",
+      token: generateToken(freshUser._id),
+      user: {
+        id: freshUser._id,
+        _id: freshUser._id,
+        name: freshUser.name,
+        email: freshUser.email,
+        ...shapeAuthUser(freshUser),
+      },
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: "Email already registered. Please log in." });
+    }
+    return res.status(500).json({ message: "Registration failed", error: error.message });
+  }
+};
+
 const resetPassword = async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
@@ -428,6 +592,8 @@ module.exports = {
   registerUser,
   loginUser,
   verifyOtpLogin,
+  sendRegisterOtp,
+  verifyRegisterOtp,
   forgotPassword,
   resetPassword,
   changePassword,

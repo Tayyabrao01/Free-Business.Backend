@@ -1,0 +1,16 @@
+{
+  "apps": [
+    {
+      "name": "freebusiness-api",
+      "script": "server.js",
+      "cwd": "/home/YOUR_USER/domains/apps.freebusinessgip.com/backend",
+      "instances": 1,
+      "autorestart": true,
+      "watch": false,
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "env_file": ".env"
+    }
+  ]
+}

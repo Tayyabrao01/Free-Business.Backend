@@ -1,12 +1,24 @@
-const express = require("express");
-const dotenv = require("dotenv");
-const cors = require("cors");
 const path = require("path");
+const { loadEnv } = require("./config/loadEnv");
+const { loadEmailConfig } = require("./config/loadEmailConfig");
+
+const envLoadResult = loadEnv();
+const emailConfigLoadResult = loadEmailConfig();
+
+const express = require("express");
+const { isFirebaseAdminConfigured } = require("./config/firebaseAdmin");
+const {
+  isBrevoConfigured,
+  isEmailConfigured,
+  getEmailConfigStatus,
+  getBrevoApiKey,
+  getBrevoSenderEmail,
+} = require("./services/emailService");
+const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const connectDB = require("./config/db");
 const { ensureUploadsDir } = require("./controllers/imageController");
-
-dotenv.config();
+const { getStreamServerClient } = require("./services/streamChatService");
 connectDB();
 ensureUploadsDir();
 
@@ -32,6 +44,17 @@ const authLimiter = rateLimit({
   message: { message: "Too many auth attempts, please try again in a minute." },
 });
 
+const otpSendLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: "Too many OTP requests. Please wait a minute.",
+    error: "Too many OTP requests. Please wait a minute.",
+  },
+});
+
 const otpVerifyLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 20,
@@ -40,7 +63,27 @@ const otpVerifyLimiter = rateLimit({
   message: { message: "Too many OTP verification attempts. Try again shortly." },
 });
 
-app.use(cors());
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Accept",
+      "Origin",
+      "X-Requested-With",
+      "X-FB-Client",
+      "X-FB-Platform",
+    ],
+  })
+);
+app.use((req, res, next) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.set("CDN-Cache-Control", "no-store");
+  res.set("Surrogate-Control", "no-store");
+  next();
+});
 app.use(express.json({ limit: "10mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
@@ -60,19 +103,49 @@ app.get("/privacy", (_req, res) => {
 });
 
 app.get("/api/health", (_req, res) => {
+  const freshEmailConfig = loadEmailConfig();
+  const emailStatus = getEmailConfigStatus();
+  const brevoKey = getBrevoApiKey();
+  const streamConfigured = Boolean(getStreamServerClient());
   res.json({
     ok: true,
-    version: "2.5.0",
+    version: "2.7.5",
+    streamConfigured,
+    streamApiKeyPresent: Boolean(process.env.STREAM_API_KEY),
+    streamApiSecretPresent: Boolean(process.env.STREAM_API_SECRET),
     chatFix: "2.4.2",
     avatarFix: "2.4.3",
     hostingerFix: "2.4.4",
     uploadFix: "2.4.5",
     passwordAndGroups: "2.5.0",
+    firebaseAdmin: isFirebaseAdminConfigured(),
+    brevo: emailStatus.brevo,
+    email: emailStatus.email,
+    emailConfig: {
+      ...emailStatus,
+      brevoKeyLength: brevoKey.length,
+      senderEmail: getBrevoSenderEmail() || null,
+      envFileFound: Boolean(envLoadResult.loadedFrom),
+      envLoadedFrom: envLoadResult.loadedFrom,
+      emailConfigReady: freshEmailConfig.ready,
+      emailConfigAppliedFrom: freshEmailConfig.applied.map((item) => item.source),
+      emailConfigScan: freshEmailConfig.scanned,
+      recommendedFile: freshEmailConfig.recommendedFile,
+      serverCwd: process.cwd(),
+      serverDir: __dirname,
+      hint: emailStatus.deliverabilityWarning
+        ? emailStatus.deliverabilityWarning
+        : emailStatus.brevo
+          ? `Brevo ready. Sending from: ${(emailStatus.activeSenders || []).join(', ') || 'unknown'}`
+          : freshEmailConfig.scanned.some((item) => item.filePath.endsWith("email.config.js") && item.exists)
+            ? "email.config.js found but BREVO_API_KEY is empty or still placeholder — edit and restart"
+            : "Copy config/email.config.example.js to config/email.config.js, paste Brevo key, restart",
+    },
     features: {
       social: true,
       groups: true,
       rewards: true,
-      stream: true,
+      stream: streamConfigured,
       directChannelRoute: true,
       groupSyncRoute: true,
     },
@@ -81,6 +154,9 @@ app.get("/api/health", (_req, res) => {
 
 app.use("/api", generalLimiter);
 app.use("/api/auth", authLimiter);
+app.use("/api/otp/send-otp", otpSendLimiter);
+app.use("/api/otp/resend-otp", otpSendLimiter);
+app.use("/api/otp/verify-otp", otpVerifyLimiter);
 app.use("/api/auth/otp/verify", otpVerifyLimiter);
 
 app.use("/api/users", require("./routes/userRoutes"));
@@ -91,6 +167,7 @@ app.use("/api/payments", require("./routes/paymentRoutes"));
 app.use("/api/reviews", require("./routes/reviewRoutes"));
 app.use("/api/images", require("./routes/imageRoutes"));
 app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/otp", require("./routes/otpRoutes"));
 app.use("/api/posts", require("./routes/postRoutes"));
 app.use("/api/messages", require("./routes/messageRoutes"));
 app.use("/api/conversations", require("./routes/conversationRoutes"));
@@ -107,7 +184,11 @@ app.use((err, _req, res, _next) => {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
+  const emailConfig = getEmailConfigStatus();
   console.log(`Server running on port ${PORT}`);
-  console.log("API version: 2.5.0 (password reset + WhatsApp groups)");
+  console.log("API version: 2.7.5 (chat never wiped on calls + ringing fixes)");
   console.log("API features: social, groups, rewards, stream, chat-status");
+  console.log(
+    `Email: ${emailConfigLoadResult.ready ? "configured" : "NOT configured"} | Brevo key length: ${emailConfigLoadResult.brevoKeyLength} | recommended: ${emailConfigLoadResult.recommendedFile}`
+  );
 });

@@ -102,19 +102,31 @@ router.post('/stream/channel/direct', authMiddleware, async (req, res) => {
 
 router.post('/stream/chat/open', authMiddleware, async (req, res) => {
   try {
-    const { otherUserId, otherUserName, groupId, channelId, channelType } = req.body;
+    const { otherUserId, otherUserName, groupId, channelId, channelType, forceRebuild } =
+      req.body;
     const result = await openChatChannel(req.user._id, {
       otherUserId,
       otherUserName,
       groupId,
       channelId,
       channelType,
+      forceRebuild: forceRebuild === true,
     });
     return res.status(200).json({ success: true, ...result });
   } catch (error) {
     console.error('Open chat error:', error);
-    return res.status(500).json({
-      message: error.message || 'Failed to open chat',
+    const msg = error.message || 'Failed to open chat';
+    let status = 500;
+    if (/join the group|not a member|do not have access/i.test(msg)) {
+      status = 403;
+    } else if (/not configured|stream is not configured/i.test(msg)) {
+      status = 503;
+    } else if (/not found/i.test(msg)) {
+      status = 404;
+    }
+    return res.status(status).json({
+      message: msg,
+      error: msg,
     });
   }
 });

@@ -6,7 +6,7 @@ const { incrementPostsCount } = require("../services/rewardTrackingService");
 const getPosts = async (req, res) => {
   try {
     const posts = await Post.find()
-      .populate("author", "name email")
+      .populate("author", "name email avatar profileImage")
       .populate("likes", "name")
       .populate("comments.user", "name")
       .sort({ createdAt: -1 });
@@ -45,7 +45,7 @@ const createPost = async (req, res) => {
       console.error('Post activity log error:', activityError.message);
     }
 
-    const populatedPost = await Post.findById(post._id).populate("author", "name email");
+    const populatedPost = await Post.findById(post._id).populate("author", "name email avatar profileImage");
 
     res.status(201).json(populatedPost);
   } catch (error) {

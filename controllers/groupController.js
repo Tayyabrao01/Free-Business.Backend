@@ -7,13 +7,31 @@ const {
 } = require('../services/streamGroupService');
 const { getStreamServerClient } = require('../services/streamChatService');
 
+const normalizeUserId = (value) => {
+  if (value == null) {
+    return '';
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value._id != null) {
+    return value._id.toString();
+  }
+  return value.toString();
+};
+
 const isMember = (group, userId) =>
-  group.members.some((id) => id.toString() === userId.toString());
+  (group.members || []).some(
+    (member) => normalizeUserId(member) === normalizeUserId(userId)
+  );
 
 const isPending = (group, userId) =>
-  group.pendingMembers.some((id) => id.toString() === userId.toString());
+  (group.pendingMembers || []).some(
+    (member) => normalizeUserId(member) === normalizeUserId(userId)
+  );
 
-const isOwner = (group, userId) => group.owner.toString() === userId.toString();
+const isOwner = (group, userId) =>
+  normalizeUserId(group.owner) === normalizeUserId(userId);
 
 const canViewGroup = (group, userId) => {
   if (isMember(group, userId) || isOwner(group, userId) || isPending(group, userId)) {
@@ -37,6 +55,7 @@ const formatGroupListItem = (group, userId) => ({
   isPending: isPending(group, userId),
   isOwner: isOwner(group, userId),
   canChat: canViewPosts(group, userId),
+  memberIds: (group.members || []).map(normalizeUserId).filter(Boolean),
   streamChannelId: getGroupChannelId(group._id),
   streamChannelType: 'messaging',
   createdAt: group.createdAt,
@@ -165,7 +184,7 @@ const joinGroup = async (req, res) => {
     if (group.privacy === 'public') {
       group.members.push(userId);
       group.pendingMembers = group.pendingMembers.filter(
-        (id) => id.toString() !== userId.toString()
+        (id) => normalizeUserId(id) !== normalizeUserId(userId)
       );
       await group.save();
       const refreshed = await Group.findById(group._id)
@@ -203,9 +222,11 @@ const leaveGroup = async (req, res) => {
       return res.status(400).json({ message: 'Owner cannot leave the group. Transfer ownership first.' });
     }
 
-    group.members = group.members.filter((id) => id.toString() !== userId.toString());
+    group.members = group.members.filter(
+      (id) => normalizeUserId(id) !== normalizeUserId(userId)
+    );
     group.pendingMembers = group.pendingMembers.filter(
-      (id) => id.toString() !== userId.toString()
+      (id) => normalizeUserId(id) !== normalizeUserId(userId)
     );
     await group.save();
 
@@ -226,6 +247,8 @@ const leaveGroup = async (req, res) => {
 
 const syncGroupChat = async (req, res) => {
   try {
+    const forceRebuild =
+      req.body?.forceRebuild === true || req.query?.forceRebuild === '1';
     const group = await Group.findById(req.params.groupId)
       .populate('owner', 'name avatar')
       .populate('members', 'name avatar');
@@ -238,7 +261,16 @@ const syncGroupChat = async (req, res) => {
       return res.status(403).json({ message: 'Join the group to open group chat' });
     }
 
-    const result = await syncGroupStreamChannel(group, req.user._id);
+    const result = await syncGroupStreamChannel(group, req.user._id, {
+      forceRebuild,
+    });
+
+    if (!result?.synced) {
+      return res.status(500).json({
+        message: result?.reason || 'Failed to sync group chat',
+        error: result?.reason || 'Failed to sync group chat',
+      });
+    }
 
     return res.status(200).json({
       message: 'Group chat ready',
@@ -248,9 +280,11 @@ const syncGroupChat = async (req, res) => {
       memberCount: result.memberCount,
     });
   } catch (error) {
+    console.error('Sync group chat error:', error);
+    const msg = error.message || 'Failed to sync group chat';
     return res.status(500).json({
-      message: 'Failed to sync group chat',
-      error: error.message,
+      message: msg,
+      error: msg,
     });
   }
 };
@@ -324,12 +358,16 @@ const removeMember = async (req, res) => {
     if (!isOwner(group, req.user._id)) {
       return res.status(403).json({ message: 'Only the group admin can remove members' });
     }
-    if (memberId === group.owner.toString()) {
+    if (normalizeUserId(memberId) === normalizeUserId(group.owner)) {
       return res.status(400).json({ message: 'Cannot remove the group admin' });
     }
 
-    group.members = group.members.filter((id) => id.toString() !== memberId);
-    group.pendingMembers = group.pendingMembers.filter((id) => id.toString() !== memberId);
+    group.members = group.members.filter(
+      (id) => normalizeUserId(id) !== normalizeUserId(memberId)
+    );
+    group.pendingMembers = group.pendingMembers.filter(
+      (id) => normalizeUserId(id) !== normalizeUserId(memberId)
+    );
     await group.save();
 
     const refreshed = await Group.findById(group._id)
@@ -366,7 +404,9 @@ const approveMember = async (req, res) => {
       return res.status(400).json({ message: 'No pending request for this user' });
     }
 
-    group.pendingMembers = group.pendingMembers.filter((id) => id.toString() !== memberId);
+    group.pendingMembers = group.pendingMembers.filter(
+      (id) => normalizeUserId(id) !== normalizeUserId(memberId)
+    );
     if (!isMember(group, memberId)) {
       group.members.push(memberId);
     }
@@ -398,7 +438,9 @@ const rejectMember = async (req, res) => {
       return res.status(403).json({ message: 'Only the group admin can reject requests' });
     }
 
-    group.pendingMembers = group.pendingMembers.filter((id) => id.toString() !== memberId);
+    group.pendingMembers = group.pendingMembers.filter(
+      (id) => normalizeUserId(id) !== normalizeUserId(memberId)
+    );
     await group.save();
 
     return res.status(200).json({ message: 'Join request rejected' });
